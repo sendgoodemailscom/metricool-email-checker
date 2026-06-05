@@ -31,6 +31,11 @@ st.markdown("""
   .mc-title  { font-size:1.7rem; font-weight:700; color:#e7ff56; margin:0; line-height:1.1; }
   .mc-sub    { font-size:0.92rem; color:#cfc3cc; margin:4px 0 0; }
 
+  .mc-intro  { background:#f4f1f5; border:1px solid #e8d9e4; border-left:4px solid #2d1a29;
+               border-radius:12px; padding:16px 20px; margin:6px 0 4px; color:#2d1a29;
+               font-size:0.96rem; line-height:1.5; }
+  .mc-intro b { color:#2d1a29; }
+
   .score-box  { padding:14px 20px; border-radius:12px; margin-bottom:6px; font-family:inherit; }
   .score-pass { background:#d0e9d7; border-left:4px solid #50a76a; }
   .score-warn { background:#fff3ed; border-left:4px solid #fb5124; }
@@ -177,6 +182,25 @@ def is_footer_link(a_tag):
             return True
     return False
 
+def _bg_color(tag):
+    """Background-color hex declared on this element, if any."""
+    if not hasattr(tag, "get"): return None
+    m = re.search(r'background-color:\s*(#[0-9a-fA-F]{3,6})', tag.get("style",""))
+    return m.group(1).lower() if m else None
+
+def _text_color(tag):
+    """Text color hex declared on this element, if any."""
+    if not hasattr(tag, "get"): return None
+    m = re.search(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', tag.get("style",""))
+    return m.group(1).lower() if m else None
+
+def _ancestor_bg(tag):
+    """Nearest ancestor's background-color hex — the surface this element sits on."""
+    for parent in tag.parents:
+        bg = _bg_color(parent)
+        if bg: return bg
+    return None
+
 def run_checks(html):
     soup = BeautifulSoup(html, "html.parser")
     r = {}
@@ -270,29 +294,39 @@ def run_checks(html):
             btn_issues.append(f"Border-radius not 14/16: '{t[:30]}'")
     r["buttons"] = {"ok": not btn_issues, "issues": list(dict.fromkeys(btn_issues))}
 
-    # Color combinations — find locations
-    bg_hex = {c.lower() for c in re.findall(r'background-color:\s*(#[0-9a-fA-F]{3,6})', html)}
-    named = [HEX_TO_NAME[c] for c in bg_hex if c in HEX_TO_NAME]
+    # Color combinations — only check colors that actually touch:
+    #   (a) text sitting on top of its background, and
+    #   (b) a colored block stacked directly inside another colored block.
+    # Distant, unrelated sections are NOT compared against each other.
+    found_hex = {c.lower() for c in re.findall(r'background-color:\s*(#[0-9a-fA-F]{3,6})', html)}
+    named = [HEX_TO_NAME[c] for c in found_hex if c in HEX_TO_NAME]
+
     conflicts, seen = [], set()
-    for i, c1 in enumerate(named):
-        for c2 in named[i+1:]:
-            if c1 == c2: continue
-            pair = tuple(sorted([c1, c2]))
-            if pair in seen: continue
-            seen.add(pair)
-            if c2 not in COMPATIBLE.get(c1, set()):
-                # Find section context
-                h1_hex = BRAND_COLORS.get(c1,"")
-                h2_hex = BRAND_COLORS.get(c2,"")
-                locations = []
-                for tag in soup.find_all(True):
-                    style = tag.get("style","").lower().replace(" ","")
-                    if h1_hex in style or h2_hex in style:
-                        nearby_text = tag.get_text(strip=True)[:40]
-                        if nearby_text and len(nearby_text) > 3:
-                            locations.append(nearby_text)
-                            if len(locations) >= 2: break
-                conflicts.append({"c1": c1, "c2": c2, "context": locations[:2]})
+
+    def _flag(hex_a, hex_b, text):
+        na, nb = HEX_TO_NAME.get(hex_a), HEX_TO_NAME.get(hex_b)
+        if not na or not nb or na == nb: return
+        if nb in COMPATIBLE.get(na, set()): return   # compatible pair → fine
+        pair = tuple(sorted([na, nb]))
+        if pair in seen: return
+        seen.add(pair)
+        conflicts.append({"c1": na, "c2": nb, "context": [text] if text else []})
+
+    for tag in soup.find_all(True):
+        ctx = tag.get_text(strip=True)[:40]
+        # (a) text color vs the background it renders on
+        tc = _text_color(tag)
+        if tc:
+            bg = _bg_color(tag) or _ancestor_bg(tag)
+            if bg:
+                _flag(tc, bg, ctx)
+        # (b) this element's background vs the background directly behind it
+        own_bg = _bg_color(tag)
+        if own_bg:
+            parent_bg = _ancestor_bg(tag)
+            if parent_bg:
+                _flag(own_bg, parent_bg, ctx)
+
     r["colors"] = {"ok": not conflicts, "found": named, "conflicts": conflicts}
 
     return r
@@ -422,6 +456,18 @@ def main():
         <p class="mc-title">Email Checker</p>
         <p class="mc-sub">Optimize HTML + run pre-send checklist before uploading to Mautic</p>
       </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="mc-intro">
+      <b>Why this exists:</b> every email we send should clear the same quality bar — no exceptions.
+      Run your HTML through this checker before it goes live in Mautic and it'll catch the things that
+      quietly hurt us: Gmail clipping, missing alt text, broken UTMs, off-brand colors and fonts.
+      <br><br>
+      <b>When to use it:</b> right before you schedule or send. Paste or upload the email, hit
+      <b>Analyze &amp; Optimize</b>, and work through anything it flags. Think of it as the pre-send
+      gate that makes "high quality, every time" the default — not the hope.
     </div>
     """, unsafe_allow_html=True)
 
@@ -598,9 +644,9 @@ def main():
                                     unsafe_allow_html=True)
                 st.markdown("")
             if c["colors"]["ok"]:
-                st.success("✅ No incompatible color pairs")
+                st.success("✅ No incompatible color pairs in touching elements")
             else:
-                st.error("❌ Incompatible combinations — may hurt accessibility:")
+                st.error("❌ Incompatible touching combinations — may hurt readability:")
                 for conflict in c["colors"]["conflicts"]:
                     c1, c2 = conflict["c1"], conflict["c2"]
                     h1, h2 = BRAND_COLORS.get(c1,"#ccc"), BRAND_COLORS.get(c2,"#ccc")
@@ -608,7 +654,7 @@ def main():
                                 unsafe_allow_html=True)
                     if conflict["context"]:
                         st.caption(f"Found near: _{' / '.join(conflict['context'])}_")
-            st.info("💡 Deep Purple + Yellow go with everything. Blue↔Light Blue, Green↔Light Green, Orange↔Light Orange. Pink only with Deep Purple/Yellow.")
+            st.info("💡 Only colors that touch (text on its background, or a block stacked on another) are checked. Deep Purple + Yellow go with everything. Blue↔Light Blue, Green↔Light Green, Orange↔Light Orange. Pink only with Deep Purple/Yellow.")
 
         # Brand voice
         with st.expander("✍️  Brand voice — manual check required"):
