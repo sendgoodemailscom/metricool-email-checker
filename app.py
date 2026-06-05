@@ -67,6 +67,7 @@ BRAND_COLORS = {
     "Stone/Grey":   "#85b1bd",
 }
 HEX_TO_NAME = {v: k for k, v in BRAND_COLORS.items()}
+ALLOWED_PALETTE = {v.lower() for v in BRAND_COLORS.values()}  # only these hexes are allowed anywhere
 
 COMPATIBLE = {
     "Deep Purple":  {"Deep Purple","Yellow","Pink","Green","Light Green","Orange","Light Orange","Blue","Light Blue","Stone/Grey"},
@@ -199,6 +200,13 @@ def _border_color(tag):
     if not hasattr(tag, "get"): return None
     m = re.search(r'border[a-z-]*:\s*[^;]*?(#[0-9a-fA-F]{3,6})', tag.get("style",""))
     return m.group(1).lower() if m else None
+
+def _norm_hex(h):
+    """Normalize a hex color to lowercase 6-digit form (#abc -> #aabbcc)."""
+    h = h.lower()
+    if len(h) == 4:
+        h = "#" + "".join(c*2 for c in h[1:])
+    return h
 
 def _ancestor_bg(tag):
     """Nearest ancestor's background-color hex — the surface this element sits on."""
@@ -344,6 +352,19 @@ def run_checks(html):
                 _flag(own_bg, parent_bg, ctx)
 
     r["colors"] = {"ok": not conflicts, "found": named, "conflicts": conflicts}
+
+    # Off-palette colors — any hex used (text, background, or border) that is not
+    # one of the 10 allowed brand colors gets a warning.
+    palette_issues, seen_pal = [], set()
+    for tag in soup.find_all(True):
+        style = tag.get("style","")
+        for raw in re.findall(r'#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}\b', style):
+            hx = _norm_hex(raw)
+            if hx in ALLOWED_PALETTE or hx in seen_pal: continue
+            seen_pal.add(hx)
+            ctx = tag.get_text(strip=True)[:40]
+            palette_issues.append({"hex": hx, "context": ctx})
+    r["palette"] = {"ok": not palette_issues, "off": palette_issues}
 
     return r
 
@@ -522,7 +543,7 @@ def main():
 
     # Score
     check_keys = ["preheader","unsubscribe","alt_text","linked_images",
-                  "utm","videos","text_style","buttons","colors"]
+                  "utm","videos","text_style","buttons","colors","palette"]
     passed = sum(1 for k in check_keys if checks.get(k,{}).get("ok",False))
     total = len(check_keys)
 
@@ -671,6 +692,24 @@ def main():
                     if conflict["context"]:
                         st.caption(f"Found near: _{' / '.join(conflict['context'])}_")
             st.info("💡 Only colors that touch (text on its background, or a block stacked on another) are checked. Deep Purple + Yellow go with everything. Blue↔Light Blue, Green↔Light Green, Orange↔Light Orange. Pink only with Deep Purple/Yellow.")
+
+        # Palette
+        with st.expander(f"{badge(c['palette']['ok'])}  Palette",
+                         expanded=not c['palette']['ok']):
+            if c["palette"]["ok"]:
+                st.success("✅ Every color used is in the brand palette")
+            else:
+                st.warning(f"⚠️ {len(c['palette']['off'])} color(s) used that are NOT in the brand palette:")
+                for item in c["palette"]["off"]:
+                    col_a, col_b = st.columns([1, 4])
+                    with col_a:
+                        st.markdown(f'{swatch(item["hex"])} `{item["hex"]}`', unsafe_allow_html=True)
+                    with col_b:
+                        st.markdown(f'_{item["context"]}_' if item["context"] else "_(no nearby text)_")
+            st.info("💡 Only these 10 hexes are allowed (text, background or border): "
+                    "Yellow #E7FF56 · Deep Purple #2D1A29 · Pink #F87FDD · Stone/Grey #85B1BD · "
+                    "Green #50A76A · Light Green #D0E9D7 · Orange #FB5124 · Light Orange #FFC3A1 · "
+                    "Blue #596CF2 · Light Blue #D5F0FE")
 
         # Brand voice
         with st.expander("✍️  Brand voice — manual check required"):
