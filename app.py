@@ -194,6 +194,12 @@ def _text_color(tag):
     m = re.search(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', tag.get("style",""))
     return m.group(1).lower() if m else None
 
+def _border_color(tag):
+    """First border color hex declared on this element, if any."""
+    if not hasattr(tag, "get"): return None
+    m = re.search(r'border[a-z-]*:\s*[^;]*?(#[0-9a-fA-F]{3,6})', tag.get("style",""))
+    return m.group(1).lower() if m else None
+
 def _ancestor_bg(tag):
     """Nearest ancestor's background-color hex — the surface this element sits on."""
     for parent in tag.parents:
@@ -294,9 +300,12 @@ def run_checks(html):
             btn_issues.append(f"Border-radius not 14/16: '{t[:30]}'")
     r["buttons"] = {"ok": not btn_issues, "issues": list(dict.fromkeys(btn_issues))}
 
-    # Color combinations — only check colors that actually touch:
-    #   (a) text sitting on top of its background, and
-    #   (b) a colored block stacked directly inside another colored block.
+    # Color combinations — only check colors that actually touch, and respect
+    # borders as separators:
+    #   (a) text color vs the background it renders on (readability), and
+    #   (b) a colored block vs whatever is directly behind it — BUT if the block
+    #       has a border, that border is the visual separator, so we compare each
+    #       background against the border instead of against each other.
     # Distant, unrelated sections are NOT compared against each other.
     found_hex = {c.lower() for c in re.findall(r'background-color:\s*(#[0-9a-fA-F]{3,6})', html)}
     named = [HEX_TO_NAME[c] for c in found_hex if c in HEX_TO_NAME]
@@ -320,11 +329,18 @@ def run_checks(html):
             bg = _bg_color(tag) or _ancestor_bg(tag)
             if bg:
                 _flag(tc, bg, ctx)
-        # (b) this element's background vs the background directly behind it
+        # (b) this element's background vs the surface behind it
         own_bg = _bg_color(tag)
         if own_bg:
+            border = _border_color(tag)
             parent_bg = _ancestor_bg(tag)
-            if parent_bg:
+            if border:
+                # border separates the two surfaces — check each side against it
+                _flag(own_bg, border, ctx)
+                if parent_bg:
+                    _flag(border, parent_bg, ctx)
+            elif parent_bg:
+                # backgrounds touch directly — compare them to each other
                 _flag(own_bg, parent_bg, ctx)
 
     r["colors"] = {"ok": not conflicts, "found": named, "conflicts": conflicts}
