@@ -68,6 +68,8 @@ BRAND_COLORS = {
 }
 HEX_TO_NAME = {v: k for k, v in BRAND_COLORS.items()}
 ALLOWED_PALETTE = {v.lower() for v in BRAND_COLORS.values()}  # only these hexes are allowed anywhere
+# White is tolerated (used widely as a background); black is NOT — our black is Deep Purple.
+PALETTE_TOLERATED = {"#ffffff"}
 
 COMPATIBLE = {
     "Deep Purple":  {"Deep Purple","Yellow","Pink","Green","Light Green","Orange","Light Orange","Blue","Light Blue","Stone/Grey"},
@@ -354,13 +356,13 @@ def run_checks(html):
     r["colors"] = {"ok": not conflicts, "found": named, "conflicts": conflicts}
 
     # Off-palette colors — any hex used (text, background, or border) that is not
-    # one of the 10 allowed brand colors gets a warning.
+    # one of the 10 allowed brand colors gets a warning. White is tolerated.
     palette_issues, seen_pal = [], set()
     for tag in soup.find_all(True):
         style = tag.get("style","")
         for raw in re.findall(r'#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}\b', style):
             hx = _norm_hex(raw)
-            if hx in ALLOWED_PALETTE or hx in seen_pal: continue
+            if hx in ALLOWED_PALETTE or hx in PALETTE_TOLERATED or hx in seen_pal: continue
             seen_pal.add(hx)
             ctx = tag.get_text(strip=True)[:40]
             palette_issues.append({"hex": hx, "context": ctx})
@@ -709,7 +711,8 @@ def main():
             st.info("💡 Only these 10 hexes are allowed (text, background or border): "
                     "Yellow #E7FF56 · Deep Purple #2D1A29 · Pink #F87FDD · Stone/Grey #85B1BD · "
                     "Green #50A76A · Light Green #D0E9D7 · Orange #FB5124 · Light Orange #FFC3A1 · "
-                    "Blue #596CF2 · Light Blue #D5F0FE")
+                    "Blue #596CF2 · Light Blue #D5F0FE. "
+                    "White is allowed for backgrounds; black is not — our black is Deep Purple #2D1A29.")
 
         # Brand voice
         with st.expander("✍️  Brand voice — manual check required"):
