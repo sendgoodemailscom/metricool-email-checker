@@ -4,6 +4,7 @@ import base64
 import subprocess
 import tempfile
 from html import escape as html_escape
+from urllib.parse import quote as url_quote
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -44,8 +45,11 @@ st.markdown("""
 
   div[data-testid="stExpander"] { border:1px solid #e8e8e8; border-radius:12px; margin-bottom:6px; }
   .stButton>button { font-family:'Plus Jakarta Sans',Arial,sans-serif; font-weight:600; border-radius:10px; }
-  .stButton>button[kind="primary"] { background:#2d1a29; color:white; border:none; }
-  .stButton>button[kind="primary"]:hover { background:#50a76a; }
+  .stButton>button[kind="primary"] { background:#e7ff56; color:#2d1a29; border:2px solid #2d1a29; }
+  .stButton>button[kind="primary"]:hover,
+  .stButton>button[kind="primary"]:focus,
+  .stButton>button[kind="primary"]:active { background:#2d1a29; color:#e7ff56; border:2px solid #2d1a29; }
+  .stButton>button[kind="primary"]:hover * { color:#e7ff56; }
 
   code { background:#f4f1f5; color:#2d1a29; border-radius:4px; padding:1px 5px; }
 </style>
@@ -218,6 +222,16 @@ def _ancestor_bg(tag):
         if bg: return bg
     return None
 
+def _effective_text_color(node):
+    """The text color actually applied to this node: its own, else the nearest
+    ancestor that sets one. Avoids flagging container colors that get overridden."""
+    el = node
+    while el is not None and hasattr(el, "get"):
+        c = _text_color(el)
+        if c: return c, el
+        el = el.parent
+    return None, None
+
 def run_checks(html):
     soup = BeautifulSoup(html, "html.parser")
     r = {}
@@ -278,24 +292,19 @@ def run_checks(html):
             bad_vid.append(src[:80])
     r["videos"] = {"ok": not bad_vid, "flagged": bad_vid}
 
-    # Text styling — find specific elements with wrong colors
-    style_issues = []
-    for tag in soup.find_all(True):
-        style = tag.get("style","")
-        colors_in_style = re.findall(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', style)
-        for c in colors_in_style:
-            if c.lower() not in ALLOWED_TEXT_COLORS:
-                text = tag.get_text(strip=True)[:60]
-                if text and len(text) > 3:
-                    style_issues.append({"color": c.lower(), "text": text, "tag": tag.name})
-    # Deduplicate by color+text
-    seen_issues = set()
-    unique_issues = []
-    for i in style_issues:
-        key = (i["color"], i["text"][:20])
-        if key not in seen_issues:
+    # Text styling — check the color that ACTUALLY renders on each piece of text
+    # (its nearest color-defining ancestor), so a container color that gets
+    # overridden by inner elements is not mis-reported as the text color.
+    unique_issues, seen_issues = [], set()
+    for txt in soup.find_all(string=True):
+        s = txt.strip()
+        if len(s) <= 3: continue
+        c, _decl = _effective_text_color(txt.parent)
+        if c and c not in ALLOWED_TEXT_COLORS:
+            key = (c, s[:20])
+            if key in seen_issues: continue
             seen_issues.add(key)
-            unique_issues.append(i)
+            unique_issues.append({"color": c, "text": s[:60], "tag": getattr(txt.parent, "name", "")})
     has_arial = "arial" in " ".join(t.get("style","") for t in soup.find_all(True)).lower()
     r["text_style"] = {"ok": has_arial and not unique_issues,
                        "has_arial": has_arial, "issues": unique_issues[:10]}
@@ -398,10 +407,6 @@ def build_preview(html, checks):
         errors.append({"id": mid, "color": color,
                        "title": PREVIEW_TYPES[etype][1], "detail": detail})
 
-    # Help remote images render despite hotlink/referrer protection
-    for img in soup.find_all("img"):
-        img["referrerpolicy"] = "no-referrer"
-
     # Images missing alt
     for img in soup.find_all("img"):
         if img.get("alt","").strip(): continue
@@ -421,14 +426,24 @@ def build_preview(html, checks):
         if not all(p in href for p in UTM_REQUIRED):
             mark(a, "utm", (a.get_text(strip=True)[:50] or href[:60]))
 
-    # Off-brand text colors
-    for tag in soup.find_all(True):
-        if tag.has_attr("data-mcid"): continue
-        colors = re.findall(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', tag.get("style",""))
-        for c in colors:
-            if c.lower() not in ALLOWED_TEXT_COLORS:
-                mark(tag, "text", f"{c} — {tag.get_text(strip=True)[:40]}")
-                break
+    # Off-brand text colors — mark the element that actually renders the text
+    # in an off-brand color (effective color), not overridden containers.
+    seen_text = set()
+    for txt in soup.find_all(string=True):
+        s = txt.strip()
+        if len(s) <= 3: continue
+        c, decl = _effective_text_color(txt.parent)
+        if c and c not in ALLOWED_TEXT_COLORS and decl is not None and not decl.has_attr("data-mcid"):
+            if (c, s[:20]) in seen_text: continue
+            seen_text.add((c, s[:20]))
+            mark(decl, "text", f"{c} — {s[:40]}")
+
+    # Route images through a proxy so hotlink-protected sources still render in
+    # the preview (metricool.com blocks direct hotlinking). Display-only.
+    for img in soup.find_all("img"):
+        src = img.get("src","")
+        if src.startswith("http"):
+            img["src"] = "https://images.weserv.nl/?url=" + url_quote(re.sub(r"^https?://", "", src), safe="")
 
     body = soup.find("body")
     email_inner = body.decode_contents() if body else str(soup)
@@ -579,7 +594,7 @@ def main():
       <br><br>
       <b>When to use it:</b> right before you schedule or send. Paste or upload the email, hit
       <b>Analyze &amp; Optimize</b>, and work through anything it flags. Think of it as the pre-send
-      gate that makes "high quality, every time" the default — not the hope.
+      gate that makes "high quality, every time" the default.
     </div>
     """, unsafe_allow_html=True)
 
