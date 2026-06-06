@@ -3,6 +3,7 @@ import os
 import base64
 import subprocess
 import tempfile
+from html import escape as html_escape
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -31,15 +32,15 @@ st.markdown("""
   .mc-title  { font-size:1.7rem; font-weight:700; color:#e7ff56; margin:0; line-height:1.1; }
   .mc-sub    { font-size:0.92rem; color:#cfc3cc; margin:4px 0 0; }
 
-  .mc-intro  { background:#f4f1f5; border:1px solid #e8d9e4; border-left:4px solid #2d1a29;
+  .mc-intro  { background:#f4f1f5; border:1px solid #e8d9e4;
                border-radius:12px; padding:16px 20px; margin:6px 0 4px; color:#2d1a29;
                font-size:0.96rem; line-height:1.5; }
   .mc-intro b { color:#2d1a29; }
 
   .score-box  { padding:14px 20px; border-radius:12px; margin-bottom:6px; font-family:inherit; }
-  .score-pass { background:#d0e9d7; border-left:4px solid #50a76a; }
-  .score-warn { background:#fff3ed; border-left:4px solid #fb5124; }
-  .score-fail { background:#ffeaea; border-left:4px solid #e0003c; }
+  .score-pass { background:#d0e9d7; }
+  .score-warn { background:#fff3ed; }
+  .score-fail { background:#ffeaea; }
 
   div[data-testid="stExpander"] { border:1px solid #e8e8e8; border-radius:12px; margin-bottom:6px; }
   .stButton>button { font-family:'Plus Jakarta Sans',Arial,sans-serif; font-weight:600; border-radius:10px; }
@@ -373,22 +374,42 @@ def run_checks(html):
 
 # ── Preview annotator ─────────────────────────────────────────────────────────
 
+PREVIEW_TYPES = {
+    "alt":  ("#fb5124", "Missing alt text"),
+    "utm":  ("#2d6cdf", "Missing UTM params"),
+    "text": ("#d6336c", "Off-brand text color"),
+}
+
 def build_preview(html, checks):
-    """Inject error highlights into HTML for visual preview."""
+    """Two-pane preview: annotated email on the left, an error list on the right.
+    Hovering a list item highlights the matching spot in the email and draws a
+    connector line between them."""
     soup = BeautifulSoup(html, "html.parser")
 
-    errors_injected = 0
+    errors = []
+    counter = [0]
 
-    # Mark images missing alt
+    def mark(el, etype, detail):
+        counter[0] += 1
+        mid = f"mc{counter[0]}"
+        el["data-mcid"] = mid
+        color = PREVIEW_TYPES[etype][0]
+        el["style"] = el.get("style","") + f";outline:2px solid {color};outline-offset:1px;"
+        errors.append({"id": mid, "color": color,
+                       "title": PREVIEW_TYPES[etype][1], "detail": detail})
+
+    # Help remote images render despite hotlink/referrer protection
+    for img in soup.find_all("img"):
+        img["referrerpolicy"] = "no-referrer"
+
+    # Images missing alt
     for img in soup.find_all("img"):
         if img.get("alt","").strip(): continue
         src = img.get("src","").lower()
         if any(n in src for n in NOISE_SRCS): continue
-        img["title"] = "❌ Missing alt text — add descriptive alt text"
-        img["style"] = img.get("style","") + ";outline:3px solid #fb5124 !important;outline-offset:2px;"
-        errors_injected += 1
+        mark(img, "alt", img.get("src","(no src)")[:90])
 
-    # Mark links missing UTMs
+    # Links missing UTMs
     skip_exts = [".pdf",".jpg",".jpeg",".png",".gif",".webp",".svg"]
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -398,41 +419,93 @@ def build_preview(html, checks):
         if any(href.lower().endswith(e) for e in skip_exts): continue
         if is_footer_link(a): continue
         if not all(p in href for p in UTM_REQUIRED):
-            a["title"] = f"❌ Missing UTM params — utm_source, utm_medium, utm_campaign"
-            a["style"] = a.get("style","") + ";outline:3px solid #e7ff56 !important;outline-offset:2px;"
-            errors_injected += 1
+            mark(a, "utm", (a.get_text(strip=True)[:50] or href[:60]))
 
-    # Mark text with wrong colors
+    # Off-brand text colors
     for tag in soup.find_all(True):
-        style = tag.get("style","")
-        colors = re.findall(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', style)
+        if tag.has_attr("data-mcid"): continue
+        colors = re.findall(r'(?<![background-])color:\s*(#[0-9a-fA-F]{3,6})', tag.get("style",""))
         for c in colors:
             if c.lower() not in ALLOWED_TEXT_COLORS:
-                tag["title"] = f"❌ Unexpected text color: {c}"
-                tag["style"] = style + f";outline:3px solid #596cf2 !important;"
-                errors_injected += 1
+                mark(tag, "text", f"{c} — {tag.get_text(strip=True)[:40]}")
                 break
 
-    # Inject legend CSS + legend bar at top
-    legend_html = f"""
-    <div style="position:sticky;top:0;background:#2d1a29;color:white;padding:8px 12px;
-                font-family:Arial,sans-serif;font-size:12px;z-index:9999;display:flex;gap:16px;align-items:center;">
-      <strong>📍 Error preview</strong> ({errors_injected} markers — hover for details)
-      <span>🟠 Alt text</span>
-      <span>🟡 UTM missing</span>
-      <span>🟣 Text color</span>
-    </div>
+    body = soup.find("body")
+    email_inner = body.decode_contents() if body else str(soup)
+
+    if errors:
+        head = f"{len(errors)} issue(s) — hover to locate"
+        items = "".join(
+            '<div class="mc-item" data-target="%s">'
+            '<span class="mc-dot" style="background:%s"></span>'
+            '<div class="mc-it-txt"><b>%s</b><br><span class="mc-it-detail">%s</span></div>'
+            '</div>' % (e["id"], e["color"], e["title"], html_escape(e["detail"]))
+            for e in errors
+        )
+    else:
+        head = "All clear"
+        items = '<div class="mc-empty">✅ No visual issues found in the preview.</div>'
+
+    css = """
+    #mc-wrap { position:relative; display:flex; font-family:Arial,sans-serif;
+               height:840px; border:1px solid #e8e8e8; border-radius:10px; overflow:hidden; }
+    #mc-email { flex:1; overflow:auto; background:#fff; }
+    #mc-list { width:300px; flex:none; overflow:auto; border-left:1px solid #e8e8e8;
+               background:#faf9fb; padding:10px; }
+    #mc-list-head { font-size:12px; font-weight:700; color:#2d1a29; margin-bottom:8px; }
+    .mc-item { display:flex; gap:8px; align-items:flex-start; padding:8px; border-radius:8px;
+               cursor:pointer; margin-bottom:6px; border:1px solid #ececec; background:#fff; }
+    .mc-item:hover { background:#2d1a29; border-color:#2d1a29; }
+    .mc-item:hover .mc-it-txt, .mc-item:hover .mc-it-detail { color:#fff; }
+    .mc-dot { width:10px; height:10px; border-radius:50%; flex:none; margin-top:3px; }
+    .mc-it-txt { font-size:12px; line-height:1.35; color:#2d1a29; }
+    .mc-it-detail { color:#8a8a8a; font-size:11px; word-break:break-all; }
+    .mc-empty { font-size:13px; color:#50a76a; padding:8px; }
+    #mc-svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:50; }
+    .mc-hl { box-shadow:0 0 0 3px rgba(45,26,41,.9), 0 0 0 7px rgba(231,255,86,.65) !important; }
     """
 
-    # Inject into body
-    body = soup.find("body")
-    if body:
-        legend = BeautifulSoup(legend_html, "html.parser")
-        body.insert(0, legend)
-    else:
-        return f"<div>{legend_html}{str(soup)}</div>"
+    js = """
+    (function(){
+      var wrap=document.getElementById('mc-wrap');
+      var email=document.getElementById('mc-email');
+      var svg=document.getElementById('mc-svg');
+      var items=document.querySelectorAll('.mc-item');
+      var current=null;
+      function clearLine(){ svg.innerHTML=''; }
+      function target(it){ return email.querySelector('[data-mcid="'+it.getAttribute('data-target')+'"]'); }
+      function drawLine(it,t){
+        var w=wrap.getBoundingClientRect(), a=it.getBoundingClientRect(), b=t.getBoundingClientRect(), e=email.getBoundingClientRect();
+        var x1=a.left-w.left, y1=a.top-w.top+a.height/2;
+        var x2=b.right-w.left, y2=b.top-w.top+b.height/2;
+        var top=e.top-w.top, bot=e.bottom-w.top;
+        if(y2<top)y2=top; if(y2>bot)y2=bot;
+        svg.innerHTML='<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="#2d1a29" stroke-width="1"/>'
+                     +'<circle cx="'+x2+'" cy="'+y2+'" r="3.5" fill="#2d1a29"/>'
+                     +'<circle cx="'+x1+'" cy="'+y1+'" r="3.5" fill="#2d1a29"/>';
+      }
+      function deactivate(){ if(!current)return; var t=target(current); if(t)t.classList.remove('mc-hl'); clearLine(); current=null; }
+      function activate(it){
+        deactivate(); current=it;
+        var t=target(it); if(!t)return;
+        t.classList.add('mc-hl');
+        t.scrollIntoView({block:'center'});
+        drawLine(it,t);
+        setTimeout(function(){ if(current===it) drawLine(it,t); }, 60);
+      }
+      items.forEach(function(it){ it.addEventListener('mouseenter', function(){ activate(it); }); });
+      document.getElementById('mc-list').addEventListener('mouseleave', deactivate);
+      email.addEventListener('scroll', function(){ if(current){ var t=target(current); if(t)drawLine(current,t); } });
+    })();
+    """
 
-    return str(soup)
+    return ("<style>" + css + "</style>"
+            "<div id='mc-wrap'>"
+            "<div id='mc-email'>" + email_inner + "</div>"
+            "<div id='mc-list'><div id='mc-list-head'>" + head + "</div>" + items + "</div>"
+            "<svg id='mc-svg'></svg>"
+            "</div>"
+            "<script>" + js + "</script>")
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -492,7 +565,7 @@ def main():
     <div class="mc-header">
       <img class="mc-logo" src="{ISOTYPE_URL}">
       <div>
-        <p class="mc-title">Email Checker</p>
+        <p class="mc-title">Metricool Email Checker</p>
         <p class="mc-sub">Optimize HTML + run pre-send checklist before uploading to Mautic</p>
       </div>
     </div>
@@ -565,11 +638,20 @@ def main():
 
     st.divider()
 
-    # Tabs: Checklist | Optimized HTML | Preview
-    tab_check, tab_html, tab_preview = st.tabs(["📋 Checklist", "📦 Optimized HTML", "🔍 Visual Preview"])
+    # Tabs: Checklist | Visual Preview | Optimized HTML
+    tab_check, tab_preview, tab_html = st.tabs(["📋 Checklist", "🔍 Visual Preview", "📦 Optimized HTML"])
 
     # ── Tab: Optimized HTML ───────────────────────────────────────────────────
     with tab_html:
+        pending = total - passed
+        if pending > 0:
+            st.warning(
+                f"⚠️ **This HTML is optimized, but {pending} check(s) still have issues to fix.** "
+                "The optimizer only shrinks and cleans the code — it does NOT fix the problems "
+                "flagged in the Checklist (alt text, UTMs, off-brand colors, etc.). "
+                "Review those before sending; otherwise you'll ship the same issues, just smaller."
+            )
+
         size_label = f"{orig_kb:.1f} KB → {opt_kb:.1f} KB  ({(1-opt_kb/orig_kb)*100:.0f}% smaller)"
         if len(optimized.encode()) <= GMAIL_LIMIT:
             st.success(f"✅ {opt_kb:.1f} KB — Gmail will show the full email.")
@@ -769,19 +851,9 @@ In Claude Code, paste your email copy and run:
 
     # ── Tab: Visual Preview ───────────────────────────────────────────────────
     with tab_preview:
-        st.caption("Orange outline = missing alt text · Yellow outline = missing UTM · Purple outline = unexpected text color · Hover over elements for details")
-
-        # Count markers
-        n_errors = (len(checks["alt_text"]["missing"]) +
-                    len(checks["utm"]["missing"]) +
-                    len(checks["text_style"]["issues"]))
-
-        if n_errors == 0:
-            st.success("✅ No visual errors to mark — preview is clean.")
-        else:
-            st.warning(f"⚠️ {n_errors} issue(s) marked in the preview below.")
-
-        components.html(preview_html, height=2400, scrolling=True)
+        st.caption("🟠 Missing alt text · 🔵 Missing UTM · 🔴 Off-brand text color — "
+                   "hover an item in the right-hand list to jump to it and trace the connector line.")
+        components.html(preview_html, height=880, scrolling=False)
 
 
 if __name__ == "__main__":
