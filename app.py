@@ -378,6 +378,25 @@ def run_checks(html):
             palette_issues.append({"hex": hx, "context": ctx})
     r["palette"] = {"ok": not palette_issues, "off": palette_issues}
 
+    # Italic text is not allowed inside links or buttons
+    def _has_italic(el):
+        if el.find(["em", "i"]): return True
+        if "font-style:italic" in el.get("style","").replace(" ","").lower(): return True
+        return any("font-style:italic" in d.get("style","").replace(" ","").lower()
+                   for d in el.find_all(True))
+    italic_issues, seen_it = [], set()
+    for a in soup.find_all("a"):
+        if a.get_text(strip=True) and _has_italic(a):
+            t = a.get_text(strip=True)[:60]
+            if ("Link", t) in seen_it: continue
+            seen_it.add(("Link", t)); italic_issues.append({"where": "Link", "text": t})
+    for b in soup.find_all(class_="button"):
+        if _has_italic(b):
+            t = b.get_text(strip=True)[:60]
+            if ("Button", t) in seen_it: continue
+            seen_it.add(("Button", t)); italic_issues.append({"where": "Button", "text": t})
+    r["italics"] = {"ok": not italic_issues, "issues": italic_issues}
+
     return r
 
 
@@ -633,7 +652,7 @@ def main():
 
     # Score
     check_keys = ["preheader","unsubscribe","alt_text","linked_images",
-                  "utm","videos","text_style","buttons","colors","palette"]
+                  "utm","videos","text_style","buttons","colors","palette","italics"]
     passed = sum(1 for k in check_keys if checks.get(k,{}).get("ok",False))
     total = len(check_keys)
 
@@ -810,6 +829,17 @@ def main():
                     "Green #50A76A · Light Green #D0E9D7 · Orange #FB5124 · Light Orange #FFC3A1 · "
                     "Blue #596CF2 · Light Blue #D5F0FE. "
                     "White is allowed for backgrounds; black is not — our black is Deep Purple #2D1A29.")
+
+        # Italics in links & buttons
+        with st.expander(f"{badge(c['italics']['ok'])}  Italics in links & buttons",
+                         expanded=not c['italics']['ok']):
+            if c["italics"]["ok"]:
+                st.success("✅ No italic text in links or buttons")
+            else:
+                st.error(f"❌ {len(c['italics']['issues'])} link(s)/button(s) with italic text:")
+                for it in c["italics"]["issues"]:
+                    st.markdown(f"- **{it['where']}:** _{it['text']}_")
+            st.info("💡 Italic text is not allowed in links or buttons.")
 
         # Brand voice
         with st.expander("✍️  Brand voice — manual check required"):
