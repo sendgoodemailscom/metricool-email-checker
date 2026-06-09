@@ -8,7 +8,7 @@ from urllib.parse import quote as url_quote
 
 import streamlit as st
 import streamlit.components.v1 as components
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -222,6 +222,31 @@ def _ancestor_bg(tag):
         if bg: return bg
     return None
 
+def _visible_strings(soup):
+    """Yield (node, stripped_text) for rendered text only: inside <body>, never
+    inside HTML comments (MSO/VML conditionals), <style>/<script>/<head>, or
+    hidden elements (preheader, display:none). These never show in the email."""
+    root = soup.find("body") or soup
+    for txt in root.find_all(string=True):
+        if isinstance(txt, Comment):
+            continue
+        s = txt.strip()
+        if len(s) <= 3:
+            continue
+        hidden = False
+        for anc in txt.parents:
+            name = getattr(anc, "name", "")
+            if name in ("style", "script", "title", "head"):
+                hidden = True; break
+            if not hasattr(anc, "get"):
+                continue
+            cls = " ".join(anc.get("class", []) or []).lower()
+            stl = anc.get("style", "").replace(" ", "").lower()
+            if "preheader" in cls or "display:none" in stl:
+                hidden = True; break
+        if not hidden:
+            yield txt, s
+
 def _effective_text_color(node):
     """The text color actually applied to this node: its own, else the nearest
     ancestor that sets one. Avoids flagging container colors that get overridden."""
@@ -296,9 +321,7 @@ def run_checks(html):
     # (its nearest color-defining ancestor), so a container color that gets
     # overridden by inner elements is not mis-reported as the text color.
     unique_issues, seen_issues = [], set()
-    for txt in soup.find_all(string=True):
-        s = txt.strip()
-        if len(s) <= 3: continue
+    for txt, s in _visible_strings(soup):
         c, _decl = _effective_text_color(txt.parent)
         if c and c not in ALLOWED_TEXT_COLORS:
             key = (c, s[:20])
@@ -448,9 +471,7 @@ def build_preview(html, checks):
     # Off-brand text colors — mark the element that actually renders the text
     # in an off-brand color (effective color), not overridden containers.
     seen_text = set()
-    for txt in soup.find_all(string=True):
-        s = txt.strip()
-        if len(s) <= 3: continue
+    for txt, s in _visible_strings(soup):
         c, decl = _effective_text_color(txt.parent)
         if c and c not in ALLOWED_TEXT_COLORS and decl is not None and not decl.has_attr("data-mcid"):
             if (c, s[:20]) in seen_text: continue
@@ -627,7 +648,7 @@ def main():
         uploaded = st.file_uploader("Upload .html", type=["html","htm"], label_visibility="collapsed")
     with col_paste:
         st.markdown("##### 📋 Or paste HTML")
-        st.caption("Paste the full HTML source straight from BEEFree or Mautic.")
+        st.caption("Paste the full HTML source straight from Beefree or Mautic.")
         html_paste = st.text_area("Paste HTML here", height=140,
                                    placeholder="<!DOCTYPE html><html>...",
                                    label_visibility="collapsed")
@@ -716,7 +737,7 @@ def main():
                 if c["preheader"]["ok"]:
                     st.success(f"✅ Preheader: _{c['preheader']['text'][:70]}_")
                 else:
-                    st.error('❌ No preheader — add `<div class="preheader">` in BEEFree')
+                    st.error('❌ No preheader — add `<div class="preheader">` in Beefree')
             with col2:
                 if c["unsubscribe"]["ok"]:
                     st.success("✅ `{unsubscribe_text}` token present")
@@ -757,7 +778,7 @@ def main():
             else:
                 st.error("❌ Non-YouTube video(s):")
                 for s in c["videos"]["flagged"]: st.code(s, language=None)
-            st.info("💡 YouTube only. BEEFree: Content → Video → paste YouTube link.")
+            st.info("💡 YouTube only. Beefree: Content → Video → paste YouTube link.")
 
         # Text styling
         with st.expander(f"{badge(c['text_style']['ok'])}  Text styling",
@@ -885,10 +906,10 @@ In Claude Code, paste your email copy and run:
         st.divider()
         st.info("📋 **Make sure you've reviewed all of these before sending your email.**")
         st.markdown("""
-- [ ] Subject line set in Mautic (not just BEEFree)
+- [ ] Subject line set in Mautic (not just Beefree)
 - [ ] Email name follows convention: `YYYYMM-Campaign-Name-LANG`
 - [ ] Footer language matches email language
-- [ ] Preview in BEEFree → check mobile view
+- [ ] Preview in Beefree → check mobile view
 - [ ] All links manually clicked and verified
 - [ ] Copyright year in footer is current
 - [ ] Brand voice reviewed (see section above)
