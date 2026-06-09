@@ -222,6 +222,24 @@ def _ancestor_bg(tag):
         if bg: return bg
     return None
 
+def _img_host_ok(src):
+    """True if the image is served from metricool.com (any subdomain)."""
+    m = re.match(r'https?://([^/]+)', src)
+    host = m.group(1).lower() if m else ""
+    return host == "metricool.com" or host.endswith(".metricool.com")
+
+def _img_size_bytes(src):
+    """Content-Length of an image via a HEAD request, or None if unknown."""
+    try:
+        r = subprocess.run(["curl", "-sIL", "-A", "Mozilla/5.0", "--max-time", "8", src],
+                           capture_output=True, text=True, timeout=12)
+        sizes = re.findall(r'(?im)^content-length:\s*(\d+)', r.stdout)
+        if sizes:
+            return int(sizes[-1])
+    except Exception:
+        pass
+    return None
+
 def _visible_strings(soup):
     """Yield (node, stripped_text) for rendered text only: inside <body>, never
     inside HTML comments (MSO/VML conditionals), <style>/<script>/<head>, or
@@ -401,10 +419,17 @@ def run_checks(html):
             palette_issues.append({"hex": hx, "context": ctx})
     r["palette"] = {"ok": not palette_issues, "off": palette_issues}
 
-    # Italic text is not allowed inside links or buttons
+    # Italic text is not allowed inside links or buttons. Italic can come from
+    # the element itself, a descendant, OR an ancestor wrapping it (it inherits).
     def _has_italic(el):
-        if el.find(["em", "i"]): return True
+        for anc in el.parents:
+            if getattr(anc, "name", "") in ("em", "i"): return True
+            if hasattr(anc, "get") and "font-style:italic" in anc.get("style","").replace(" ","").lower():
+                return True
+            if getattr(anc, "name", "") == "body": break
+        if el.name in ("em", "i"): return True
         if "font-style:italic" in el.get("style","").replace(" ","").lower(): return True
+        if el.find(["em", "i"]): return True
         return any("font-style:italic" in d.get("style","").replace(" ","").lower()
                    for d in el.find_all(True))
     italic_issues, seen_it = [], set()
@@ -419,6 +444,33 @@ def run_checks(html):
             if ("Button", t) in seen_it: continue
             seen_it.add(("Button", t)); italic_issues.append({"where": "Button", "text": t})
     r["italics"] = {"ok": not italic_issues, "issues": italic_issues}
+
+    # Image hosting + weight: images should live on metricool.com and stay small.
+    # Over 3 MB is a hard fail; over 2 MB is a warning worth optimizing.
+    SIZE_WARN, SIZE_FAIL = 2*1024*1024, 3*1024*1024
+    img_problems, seen_src = [], set()
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if not src.startswith("http"): continue
+        low = src.lower()
+        if any(n in low for n in NOISE_SRCS): continue   # skip spacers / system icons
+        if src in seen_src: continue
+        seen_src.add(src)
+        reasons, level = [], None
+        if not _img_host_ok(src):
+            level = "warn"; reasons.append("Not hosted on metricool.com")
+        size = _img_size_bytes(src)
+        if size is not None:
+            mb = size / 1024 / 1024
+            if size > SIZE_FAIL:
+                level = "fail"; reasons.append(f"{mb:.1f} MB — over the 3 MB limit")
+            elif size > SIZE_WARN:
+                level = level or "warn"; reasons.append(f"{mb:.1f} MB — over 2 MB, consider compressing")
+        if reasons:
+            img_problems.append({"src": src[:100], "reasons": reasons, "level": level,
+                                 "mb": (size/1024/1024 if size is not None else None)})
+    img_has_fail = any(p["level"] == "fail" for p in img_problems)
+    r["images"] = {"ok": not img_problems, "problems": img_problems, "has_fail": img_has_fail}
 
     return r
 
@@ -673,7 +725,7 @@ def main():
 
     # Score
     check_keys = ["preheader","unsubscribe","alt_text","linked_images",
-                  "utm","videos","text_style","buttons","colors","palette","italics"]
+                  "utm","videos","text_style","buttons","colors","palette","italics","images"]
     passed = sum(1 for k in check_keys if checks.get(k,{}).get("ok",False))
     total = len(check_keys)
 
@@ -861,6 +913,18 @@ def main():
                 for it in c["italics"]["issues"]:
                     st.markdown(f"- **{it['where']}:** _{it['text']}_")
             st.info("💡 Italic text is not allowed in links or buttons.")
+
+        # Image hosting & weight
+        img_badge = "✅" if c['images']['ok'] else ("❌" if c['images']['has_fail'] else "⚠️")
+        with st.expander(f"{img_badge}  Image hosting & weight", expanded=not c['images']['ok']):
+            if c["images"]["ok"]:
+                st.success("✅ All images are on metricool.com and within size limits")
+            else:
+                for p in c["images"]["problems"]:
+                    icon = "❌" if p["level"] == "fail" else "⚠️"
+                    st.markdown(f"{icon} {' · '.join(p['reasons'])}")
+                    st.code(p["src"], language=None)
+            st.info("💡 Host images on metricool.com (not Beefree/Giphy/external). Hard limit 3 MB; over 2 MB is already worth compressing. (Size read via HEAD request; some hosts may not report it.)")
 
         # Brand voice
         with st.expander("✍️  Brand voice — manual check required"):
