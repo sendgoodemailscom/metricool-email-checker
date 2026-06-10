@@ -94,8 +94,8 @@ SOCIAL_LINKS = ["instagram.com","twitter.com","linkedin.com","facebook.com","tik
                 "pinterest.com","threads.net","bsky.app","youtube.com"]
 SKIP_UTM     = ["unsubscribe","mailto:","tally.so","docs.google","politica-privacidad","#"]
 UTM_REQUIRED = ["utm_source","utm_medium","utm_campaign"]
-ALLOWED_TEXT_COLORS = {"#2d1a29","#ffffff","#fff","#1a1a1a","#596cf2",
-                       "#00a4ce","#50a76a","#d5f0fe","#2d1a2a"}
+# Any brand color is valid for text, plus white and a few legacy near-blacks.
+ALLOWED_TEXT_COLORS = ALLOWED_PALETTE | {"#ffffff", "#fff", "#1a1a1a", "#2d1a2a", "#00a4ce"}
 
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 
@@ -239,6 +239,20 @@ def _img_size_bytes(src):
     except Exception:
         pass
     return None
+
+def _is_hidden(el):
+    """True if the element (or an ancestor) is non-rendered: in head/style/script,
+    the preheader, or display:none."""
+    for anc in [el] + list(el.parents):
+        name = getattr(anc, "name", "")
+        if name in ("style", "script", "head", "title"):
+            return True
+        if hasattr(anc, "get"):
+            cls = " ".join(anc.get("class", []) or []).lower()
+            stl = anc.get("style", "").replace(" ", "").lower()
+            if "preheader" in cls or "display:none" in stl:
+                return True
+    return False
 
 def _visible_strings(soup):
     """Yield (node, stripped_text) for rendered text only: inside <body>, never
@@ -406,17 +420,26 @@ def run_checks(html):
 
     r["colors"] = {"ok": not conflicts, "found": named, "conflicts": conflicts}
 
-    # Off-palette colors — any hex used (text, background, or border) that is not
-    # one of the 10 allowed brand colors gets a warning. White is tolerated.
+    # Off-palette colors — any hex actually rendered (as text, background, or
+    # border) that is not one of the 10 brand colors. White is tolerated. We only
+    # report colors tied to a visible role so there are no untraceable entries.
     palette_issues, seen_pal = [], set()
-    for tag in soup.find_all(True):
-        style = tag.get("style","")
-        for raw in re.findall(r'#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}\b', style):
-            hx = _norm_hex(raw)
-            if hx in ALLOWED_PALETTE or hx in PALETTE_TOLERATED or hx in seen_pal: continue
-            seen_pal.add(hx)
-            ctx = tag.get_text(strip=True)[:40]
-            palette_issues.append({"hex": hx, "context": ctx})
+    def _add_pal(hx, role, ctx):
+        if not hx: return
+        hx = _norm_hex(hx)
+        if hx in ALLOWED_PALETTE or hx in PALETTE_TOLERATED: return
+        if (hx, role) in seen_pal: return
+        seen_pal.add((hx, role))
+        palette_issues.append({"hex": hx, "role": role, "context": (ctx or "")[:40]})
+    # text: only colors that actually render on visible text
+    for txt, s in _visible_strings(soup):
+        c, _decl = _effective_text_color(txt.parent)
+        _add_pal(c, "text", s)
+    # backgrounds & borders on visible elements
+    for el in soup.find_all(True):
+        if _is_hidden(el): continue
+        _add_pal(_bg_color(el), "background", el.get_text(strip=True))
+        _add_pal(_border_color(el), "border", el.get_text(strip=True))
     r["palette"] = {"ok": not palette_issues, "off": palette_issues}
 
     # Italic text is not allowed inside links or buttons. Italic can come from
@@ -458,7 +481,7 @@ def run_checks(html):
         seen_src.add(src)
         reasons, level = [], None
         if not _img_host_ok(src):
-            level = "warn"; reasons.append("Not hosted on metricool.com")
+            level = "warn"; reasons.append("Not allowed: every image must be hosted on metricool.com")
         size = _img_size_bytes(src)
         if size is not None:
             mb = size / 1024 / 1024
@@ -896,7 +919,8 @@ def main():
                     with col_a:
                         st.markdown(f'{swatch(item["hex"])} `{item["hex"]}`', unsafe_allow_html=True)
                     with col_b:
-                        st.markdown(f'_{item["context"]}_' if item["context"] else "_(no nearby text)_")
+                        ctx = f" — _{item['context']}_" if item.get("context") else ""
+                        st.markdown(f"**{item.get('role','')}**{ctx}", unsafe_allow_html=True)
             st.info("💡 Only these 10 hexes are allowed (text, background or border): "
                     "Yellow #E7FF56 · Deep Purple #2D1A29 · Pink #F87FDD · Stone/Grey #85B1BD · "
                     "Green #50A76A · Light Green #D0E9D7 · Orange #FB5124 · Light Orange #FFC3A1 · "
